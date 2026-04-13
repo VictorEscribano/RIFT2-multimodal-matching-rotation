@@ -29,6 +29,8 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
+from . import _descriptor_kernel as _kernel
+
 
 def build_max_index_map(eo: np.ndarray) -> np.ndarray:
     """Build the Max Index Map from complex log-Gabor responses.
@@ -130,6 +132,11 @@ def compute_descriptors(
             np.empty((0,), dtype=np.int64),
         )
 
+    if _kernel.HAS_NUMBA:
+        return _compute_descriptors_numba(
+            mim, oriented_keypoints, patch_size, norient, ncells
+        )
+
     H, W = mim.shape
     radius = patch_size // 2
     out_size = patch_size + 1
@@ -180,3 +187,26 @@ def compute_descriptors(
         keep += 1
 
     return descriptors[:keep], valid_idx[:keep]
+
+
+def _compute_descriptors_numba(
+    mim: np.ndarray,
+    oriented_keypoints: np.ndarray,
+    patch_size: int,
+    norient: int,
+    ncells: int,
+) -> "tuple[np.ndarray, np.ndarray]":
+    """Numba-accelerated path used when the JIT backend is available."""
+    mim_u8 = np.ascontiguousarray(mim, dtype=np.uint8)
+    kpts = np.ascontiguousarray(oriented_keypoints, dtype=np.float32)
+    n = kpts.shape[0]
+    descriptors = np.zeros((n, ncells * ncells * norient), dtype=np.float32)
+    valid = np.zeros(n, dtype=np.int8)
+
+    _kernel.describe_batch_numba(
+        mim_u8, kpts, int(patch_size), int(norient), int(ncells), descriptors, valid
+    )
+
+    keep_mask = valid.astype(bool)
+    valid_idx = np.nonzero(keep_mask)[0].astype(np.int64)
+    return descriptors[keep_mask], valid_idx
