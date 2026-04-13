@@ -63,19 +63,20 @@ cd RIFT2-multimodal-matching-rotation
 pip install -e .
 ```
 
-Runtime dependencies:
+Runtime dependencies (installed automatically):
 
 - `numpy >= 1.21`
-- `scipy >= 1.7` (faster FFT; optional at import time)
+- `scipy >= 1.7` — multithreaded `pocketfft`
 - `opencv-python >= 4.5`
+- `numba >= 0.57, < 0.65` — JIT-compiles the per-keypoint descriptor
+  kernel and releases the GIL so the threaded batch path scales. The
+  upper bound avoids a known incompatibility with newer numba builds.
+- `coverage >= 7.5` — required by recent numba releases at import time.
 
-Optional acceleration:
+Optional GPU acceleration:
 
-- `numba >= 0.57` (`pip install -e .[jit]`) — JIT-compiles the
-  per-keypoint descriptor loop and releases the GIL, so threaded batches
-  scale.
-- `cupy-cuda12x` / `cupy-cuda11x` (`pip install -e .[cuda12]`) — moves
-  the phase-congruency FFTs to the GPU; opt in with `RIFT2(device='cuda')`.
+- `pip install -e .[cuda12]` (or `.[cuda11]`) installs CuPy and enables
+  the GPU phase-congruency front-end. Opt in with `RIFT2(device='cuda')`.
 
 `pip install rift2` support via PyPI will be added in a later release; the
 project layout (`pyproject.toml`, `rift2/` package) is already compatible.
@@ -200,17 +201,19 @@ instance** to keep the filter bank hot, or call
 `RIFT2.describe_batch(images, max_workers=N)` which groups inputs by shape
 and runs them concurrently.
 
-### Optional accelerators
+### Accelerators
 
-- `pip install -e .[jit]` enables a Numba-compiled descriptor kernel that
-  fuses sampling, MIM rotation, cell histogramming and L2 normalization
-  into one parallel pass per keypoint. It also releases the GIL so the
-  threaded `describe_batch` path delivers real wall-clock speedups.
-- `pip install -e .[cuda12]` enables a CuPy GPU backend for the
-  phase-congruency front-end, opt-in via `RIFT2(device="cuda")`. Only the
-  FFT-heavy front-end runs on the device; the descriptor and matching
-  stages stay on the CPU because they are dominated by integer/branchy
-  logic that does not benefit from a GPU.
+- **Numba (default).** A JIT-compiled descriptor kernel ships as part of
+  the standard installation. It fuses rotated patch sampling, MIM
+  circular shift, cell histogramming and L2 normalization into a single
+  parallel pass per keypoint, and releases the GIL so the threaded
+  `describe_batch` path delivers real wall-clock speedups.
+- **CuPy CUDA (opt-in).** `pip install -e .[cuda12]` enables a GPU
+  backend for the phase-congruency front-end, used by passing
+  `device="cuda"` to the `RIFT2` constructor. Only the FFT-heavy
+  front-end runs on the device; the descriptor and matching stages stay
+  on the CPU because they are dominated by integer/branchy logic that
+  does not benefit from a GPU.
 
 ---
 
