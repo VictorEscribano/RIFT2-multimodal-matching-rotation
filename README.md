@@ -69,6 +69,14 @@ Runtime dependencies:
 - `scipy >= 1.7` (faster FFT; optional at import time)
 - `opencv-python >= 4.5`
 
+Optional acceleration:
+
+- `numba >= 0.57` (`pip install -e .[jit]`) — JIT-compiles the
+  per-keypoint descriptor loop and releases the GIL, so threaded batches
+  scale.
+- `cupy-cuda12x` / `cupy-cuda11x` (`pip install -e .[cuda12]`) — moves
+  the phase-congruency FFTs to the GPU; opt in with `RIFT2(device='cuda')`.
+
 `pip install rift2` support via PyPI will be added in a later release; the
 project layout (`pyproject.toml`, `rift2/` package) is already compatible.
 
@@ -188,7 +196,21 @@ optimisations:
    `FastFeatureDetector_create`, which is implemented in C++ SIMD.
 
 If you process many images of the same resolution, **reuse one `RIFT2`
-instance** to keep the filter bank hot.
+instance** to keep the filter bank hot, or call
+`RIFT2.describe_batch(images, max_workers=N)` which groups inputs by shape
+and runs them concurrently.
+
+### Optional accelerators
+
+- `pip install -e .[jit]` enables a Numba-compiled descriptor kernel that
+  fuses sampling, MIM rotation, cell histogramming and L2 normalization
+  into one parallel pass per keypoint. It also releases the GIL so the
+  threaded `describe_batch` path delivers real wall-clock speedups.
+- `pip install -e .[cuda12]` enables a CuPy GPU backend for the
+  phase-congruency front-end, opt-in via `RIFT2(device="cuda")`. Only the
+  FFT-heavy front-end runs on the device; the descriptor and matching
+  stages stay on the CPU because they are dominated by integer/branchy
+  logic that does not benefit from a GPU.
 
 ---
 

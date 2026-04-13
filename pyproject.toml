@@ -33,6 +33,9 @@ dependencies = [
 
 [project.optional-dependencies]
 demo = ["matplotlib>=3.3"]
+jit = ["numba>=0.57"]
+cuda11 = ["cupy-cuda11x>=12.0"]
+cuda12 = ["cupy-cuda12x>=12.0"]
 
 [project.urls]
 Homepage = "https://github.com/ljy-rs/rift2-multimodal-matching-rotation"

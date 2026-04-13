@@ -28,6 +28,7 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
+from . import _cuda
 from .descriptor import build_max_index_map, compute_descriptors
 from .detector import detect_fast_keypoints
 from .fsc import estimate_similarity_ransac
@@ -80,8 +81,18 @@ class RIFT2:
     k: float = 1.0
     cut_off: float = 0.5
     g: float = 3.0
+    device: str = "cpu"
 
-    _filter_bank: Optional[_FilterBank] = field(default=None, init=False, repr=False)
+    _filter_bank: Optional[object] = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.device not in ("cpu", "cuda"):
+            raise ValueError(f"device must be 'cpu' or 'cuda', got {self.device!r}")
+        if self.device == "cuda" and not _cuda.HAS_CUPY:
+            raise RuntimeError(
+                "device='cuda' requested but CuPy is not installed. "
+                "Install cupy-cudaXX matching your CUDA toolkit."
+            )
 
     # ------------------------------------------------------------------ utils
 
@@ -161,15 +172,18 @@ class RIFT2:
 
     # ------------------------------------------------------------ internals
 
-    def _ensure_bank(self, shape: Tuple[int, int]) -> _FilterBank:
+    def _ensure_bank(self, shape: Tuple[int, int]):
         bank = self._filter_bank
+        builder = (
+            _cuda._CudaFilterBank.build if self.device == "cuda" else _FilterBank.build
+        )
         if (
             bank is None
             or bank.shape != shape
             or bank.nscale != self.nscale
             or bank.norient != self.norient
         ):
-            bank = _FilterBank.build(
+            bank = builder(
                 shape,
                 self.nscale,
                 self.norient,
@@ -181,14 +195,16 @@ class RIFT2:
         return bank
 
     def _describe_with_bank(
-        self, gray: np.ndarray, bank: _FilterBank
-    ) -> Tuple[RIFT2Result, _FilterBank]:
+        self, gray: np.ndarray, bank: object
+    ) -> Tuple[RIFT2Result, object]:
         """Phase-congruency + descriptor pass against a pre-built filter bank.
 
         Pure function with respect to ``self``; safe to invoke from worker
-        threads as long as ``bank`` is treated as read-only.
+        threads as long as ``bank`` is treated as read-only (CPU path) or
+        a CUDA stream is managed externally (GPU path).
         """
-        M, EO, bank = phase_congruency(
+        pc_fn = _cuda.phase_congruency_cuda if self.device == "cuda" else phase_congruency
+        M, EO, bank = pc_fn(
             gray,
             nscale=self.nscale,
             norient=self.norient,
