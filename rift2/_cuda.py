@@ -132,16 +132,16 @@ def phase_congruency_cuda(
     img = cp.asarray(image, dtype=cp.float32)
     image_fft = cp.fft.fft2(img)
 
-    EO = cp.empty((nscale, norient, rows, cols), dtype=cp.complex64)
-    energy_v0 = cp.zeros((rows, cols), dtype=cp.float32)
-    energy_v1 = cp.zeros((rows, cols), dtype=cp.float32)
-    energy_v2 = cp.zeros((rows, cols), dtype=cp.float32)
+    cs = cp.zeros((norient, rows, cols), dtype=cp.float32)
     covx2 = cp.zeros((rows, cols), dtype=cp.float32)
     covy2 = cp.zeros((rows, cols), dtype=cp.float32)
     covxy = cp.zeros((rows, cols), dtype=cp.float32)
 
     log_gabor = filter_bank.log_gabor
     spread = filter_bank.spread
+
+    eo_real = cp.empty((nscale, rows, cols), dtype=cp.float32)
+    eo_imag = cp.empty((nscale, rows, cols), dtype=cp.float32)
 
     for o in range(norient):
         angl = o * np.pi / norient
@@ -156,20 +156,21 @@ def phase_congruency_cuda(
         for s in range(nscale):
             flt = log_gabor[s] * spread_o
             eo = cp.fft.ifft2(image_fft * flt).astype(cp.complex64)
-            EO[s, o] = eo
-            an = cp.abs(eo)
+            er = eo.real
+            ei = eo.imag
+            eo_real[s] = er
+            eo_imag[s] = ei
+            an = cp.hypot(er, ei)
             sum_an = sum_an + an
-            sum_e = sum_e + eo.real
-            sum_o = sum_o + eo.imag
+            sum_e = sum_e + er
+            sum_o = sum_o + ei
             if s == 0:
                 tau = float(cp.median(sum_an).get()) / float(np.sqrt(np.log(4.0)))
                 max_an = an.copy()
             else:
                 max_an = cp.maximum(max_an, an)
 
-        energy_v0 += sum_e
-        energy_v1 += float(np.cos(angl)) * sum_o
-        energy_v2 += float(np.sin(angl)) * sum_o
+        cs[o] = sum_an
 
         x_energy = cp.sqrt(sum_e * sum_e + sum_o * sum_o) + _EPS
         mean_e = sum_e / x_energy
@@ -177,9 +178,9 @@ def phase_congruency_cuda(
 
         energy = cp.zeros_like(sum_e)
         for s in range(nscale):
-            e = EO[s, o].real
-            od = EO[s, o].imag
-            energy = energy + e * mean_e + od * mean_o - cp.abs(e * mean_o - od * mean_e)
+            er = eo_real[s]
+            ei = eo_imag[s]
+            energy = energy + er * mean_e + ei * mean_o - cp.abs(er * mean_o - ei * mean_e)
 
         total_tau = tau * (1.0 - (1.0 / mult) ** nscale) / (1.0 - 1.0 / mult)
         est_mean = total_tau * np.sqrt(np.pi / 2.0)
@@ -205,4 +206,4 @@ def phase_congruency_cuda(
     denom = cp.sqrt(covxy * covxy + (covx2 - covy2) ** 2) + _EPS
     M = (covy2 + covx2 + denom) * 0.5
 
-    return cp.asnumpy(M).astype(np.float64), cp.asnumpy(EO), filter_bank
+    return cp.asnumpy(M).astype(np.float32), cp.asnumpy(cs), filter_bank

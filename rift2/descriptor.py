@@ -32,13 +32,14 @@ import numpy as np
 from . import _descriptor_kernel as _kernel
 
 
-def build_max_index_map(eo: np.ndarray) -> np.ndarray:
-    """Build the Max Index Map from complex log-Gabor responses.
+def build_max_index_map(cs: np.ndarray) -> np.ndarray:
+    """Build the Max Index Map from per-orientation magnitude sums.
 
     Parameters
     ----------
-    eo : ndarray, shape (nscale, norient, H, W), complex
-        Output of :func:`rift2.phase_congruency.phase_congruency`.
+    cs : ndarray, shape (norient, H, W), float
+        Per-orientation accumulated log-Gabor magnitudes returned by
+        :func:`rift2.phase_congruency.phase_congruency`.
 
     Returns
     -------
@@ -46,10 +47,7 @@ def build_max_index_map(eo: np.ndarray) -> np.ndarray:
         Index in ``[0, norient)`` of the orientation channel with the
         largest summed magnitude response at every pixel.
     """
-    # Sum |EO| over scales -> (norient, H, W), then argmax over orientation.
-    cs = np.abs(eo).sum(axis=0)
-    mim = np.argmax(cs, axis=0).astype(np.uint8)
-    return mim
+    return np.argmax(cs, axis=0).astype(np.uint8)
 
 
 def _sample_rotated_patch(

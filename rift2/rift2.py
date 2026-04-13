@@ -204,7 +204,7 @@ class RIFT2:
         a CUDA stream is managed externally (GPU path).
         """
         pc_fn = _cuda.phase_congruency_cuda if self.device == "cuda" else phase_congruency
-        M, EO, bank = pc_fn(
+        M, cs, bank = pc_fn(
             gray,
             nscale=self.nscale,
             norient=self.norient,
@@ -235,7 +235,7 @@ class RIFT2:
                     axis=1,
                 )
 
-        mim = build_max_index_map(EO)
+        mim = build_max_index_map(cs)
 
         des, valid_idx = compute_descriptors(
             mim,

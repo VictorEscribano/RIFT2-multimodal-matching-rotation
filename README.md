@@ -188,13 +188,34 @@ optimisations:
 4. **Vectorised descriptor arithmetic.** MIM rotation compensation is a
    single modulo operation on a `uint8` array; cell histograms use
    `np.bincount`, which is typically faster than any Python-level loop.
-5. **OpenCV for sampling and matching.** Patch warping uses
+5. **MIM is built in-pass.** The phase congruency stage no longer
+   materialises the full `(nscale, norient, H, W)` complex `EO` array.
+   It accumulates `sum_s |EO[s, o]|` directly and returns a small
+   `(norient, H, W) float32` tensor, which is `argmax`'d in O(HW) to
+   produce the Max Index Map. This eliminates a multi-hundred-MB
+   allocation and drops MIM construction from ~50ms to ~5ms on
+   600x600 images.
+6. **Float32 throughout.** The PC front-end uses `float32` /
+   `complex64`, halving FFT compute and memory bandwidth versus the
+   double-precision MATLAB reference.
+7. **GEMM matcher.** Because RIFT2 descriptors are L2-normalized,
+   ``||a - b||^2 = 2 - 2<a,b>``, so an exact L2 nearest-neighbour search
+   is just one BLAS GEMM (`np.dot(D1, D2.T)`) followed by an `argmax`
+   per row. For typical RIFT2 sets (`>~10^4` descriptors at dim 216) this
+   is several times faster than `cv2.BFMatcher` and far more accurate
+   than FLANN's kd-tree, which suffers from the curse of dimensionality
+   at this descriptor size. The matcher falls back to `BFMatcher` for
+   tiny problems where GEMM allocation overhead dominates.
+8. **Numba orientation assignment.** The dominant-orientation loop is
+   compiled to native code via `@njit(parallel=True)`. On 5k keypoints it
+   drops from ~410ms to ~25ms.
+9. **OpenCV for sampling and matching fallbacks.** Patch warping uses
    `cv2.warpAffine` with nearest-neighbour interpolation (correct for a
-   categorical MIM); descriptor matching uses `cv2.BFMatcher`; RANSAC is
-   performed by `cv2.estimateAffinePartial2D` / `estimateAffine2D` /
-   `findHomography`, all of which release the GIL.
-6. **Fast FAST.** Keypoint detection uses OpenCV's
-   `FastFeatureDetector_create`, which is implemented in C++ SIMD.
+   categorical MIM); RANSAC is performed by
+   `cv2.estimateAffinePartial2D` / `estimateAffine2D` / `findHomography`,
+   all of which release the GIL.
+10. **Fast FAST.** Keypoint detection uses OpenCV's
+    `FastFeatureDetector_create`, which is implemented in C++ SIMD.
 
 If you process many images of the same resolution, **reuse one `RIFT2`
 instance** to keep the filter bank hot, or call

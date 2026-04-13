@@ -128,12 +128,12 @@ def phase_congruency(
     g: float = 3.0,
     filter_bank: "_FilterBank | None" = None,
 ) -> Tuple[np.ndarray, np.ndarray, "_FilterBank"]:
-    """Compute phase congruency for a grayscale image.
+    """Compute phase congruency and the per-orientation magnitude sums.
 
     Parameters
     ----------
     image
-        2-D grayscale image. Will be internally promoted to ``float64``.
+        2-D grayscale image.
     nscale, norient
         Number of log-Gabor scales and orientations. Defaults match the
         RIFT2 MATLAB reference (``nscale=4``, ``norient=6``).
@@ -142,23 +142,25 @@ def phase_congruency(
         MATLAB invocation (``mult=1.6``, ``sigmaOnf=0.75``, ``g=3``, ``k=1``).
     filter_bank
         Optional pre-built filter bank for amortized reuse across images of
-        the same size. When omitted, a fresh bank is constructed and
-        returned alongside the result so the caller can cache it.
+        the same size.
 
     Returns
     -------
-    M : ndarray, shape (H, W)
-        Maximum-moment phase congruency map (edge strength), normalized by
-        the caller as needed.
-    EO : ndarray, shape (nscale, norient, H, W), complex
-        Complex filter responses for every scale/orientation.
+    M : ndarray, shape (H, W), float32
+        Maximum-moment phase congruency map (edge strength).
+    cs : ndarray, shape (norient, H, W), float32
+        Per-orientation accumulated magnitude responses
+        ``sum_s |EO[s, o]|``. The argmax across the first axis is the
+        Max Index Map consumed by the descriptor stage. Returning ``cs``
+        rather than the full 4-D ``EO`` complex array eliminates a large
+        allocation that used to dominate FFT cache pressure.
     filter_bank : _FilterBank
         The (possibly newly created) filter bank, returned for reuse.
     """
     if image.ndim != 2:
         raise ValueError("phase_congruency expects a 2-D grayscale image")
 
-    img = image.astype(np.float64, copy=False)
+    img = image.astype(np.float32, copy=False)
     rows, cols = img.shape
 
     if filter_bank is None or filter_bank.shape != (rows, cols) \
@@ -167,40 +169,44 @@ def phase_congruency(
             (rows, cols), nscale, norient, min_wavelength, mult, sigma_on_f
         )
 
-    image_fft = _fft2(img)
+    image_fft = _fft2(img)  # complex64 because img is float32
 
-    # Pre-allocate outputs.
-    EO = np.empty((nscale, norient, rows, cols), dtype=np.complex128)
+    cs = np.zeros((norient, rows, cols), dtype=np.float32)
 
-    # Energy vector accumulator (even, odd-x, odd-y) for orientation/type.
-    energy_v = np.zeros((3, rows, cols), dtype=np.float64)
-
-    covx2 = np.zeros((rows, cols), dtype=np.float64)
-    covy2 = np.zeros((rows, cols), dtype=np.float64)
-    covxy = np.zeros((rows, cols), dtype=np.float64)
+    covx2 = np.zeros((rows, cols), dtype=np.float32)
+    covy2 = np.zeros((rows, cols), dtype=np.float32)
+    covxy = np.zeros((rows, cols), dtype=np.float32)
 
     log_gabor = filter_bank.log_gabor
     spread = filter_bank.spread
 
+    # Per-orientation work uses a small ring of (nscale+1) complex buffers
+    # so we never materialize the full (nscale, norient, H, W) EO array.
+    eo_stack_real = np.empty((nscale, rows, cols), dtype=np.float32)
+    eo_stack_imag = np.empty((nscale, rows, cols), dtype=np.float32)
+
     for o in range(norient):
-        angl = o * np.pi / norient
+        angl = float(o * np.pi / norient)
         spread_o = spread[o]
 
-        sum_e = np.zeros((rows, cols), dtype=np.float64)
-        sum_o = np.zeros((rows, cols), dtype=np.float64)
-        sum_an = np.zeros((rows, cols), dtype=np.float64)
+        sum_e = np.zeros((rows, cols), dtype=np.float32)
+        sum_o = np.zeros((rows, cols), dtype=np.float32)
+        sum_an = np.zeros((rows, cols), dtype=np.float32)
         max_an = None
         tau = 0.0
 
         for s in range(nscale):
             flt = log_gabor[s] * spread_o
-            eo = _ifft2(image_fft * flt)
-            EO[s, o] = eo
+            eo = _ifft2(image_fft * flt).astype(np.complex64, copy=False)
+            er = eo.real
+            ei = eo.imag
+            eo_stack_real[s] = er
+            eo_stack_imag[s] = ei
 
-            an = np.abs(eo)
+            an = np.hypot(er, ei)
             sum_an += an
-            sum_e += eo.real
-            sum_o += eo.imag
+            sum_e += er
+            sum_o += ei
 
             if s == 0:
                 tau = float(np.median(sum_an)) / np.sqrt(np.log(4.0))
@@ -208,9 +214,8 @@ def phase_congruency(
             else:
                 np.maximum(max_an, an, out=max_an)
 
-        energy_v[0] += sum_e
-        energy_v[1] += np.cos(angl) * sum_o
-        energy_v[2] += np.sin(angl) * sum_o
+        # Accumulate per-orientation magnitude sum for the MIM later.
+        cs[o] = sum_an
 
         x_energy = np.sqrt(sum_e * sum_e + sum_o * sum_o) + _EPS
         mean_e = sum_e / x_energy
@@ -218,23 +223,24 @@ def phase_congruency(
 
         energy = np.zeros_like(sum_e)
         for s in range(nscale):
-            e = EO[s, o].real
-            od = EO[s, o].imag
-            energy += e * mean_e + od * mean_o - np.abs(e * mean_o - od * mean_e)
+            er = eo_stack_real[s]
+            ei = eo_stack_imag[s]
+            energy += er * mean_e + ei * mean_o - np.abs(er * mean_o - ei * mean_e)
 
-        # Rayleigh-based noise threshold (simplistic geometric sum over scales).
         total_tau = tau * (1.0 - (1.0 / mult) ** nscale) / (1.0 - 1.0 / mult)
         est_mean = total_tau * np.sqrt(np.pi / 2.0)
         est_sigma = total_tau * np.sqrt((4.0 - np.pi) / 2.0)
-        noise_thresh = est_mean + k * est_sigma
+        noise_thresh = float(est_mean + k * est_sigma)
         np.maximum(energy - noise_thresh, 0.0, out=energy)
 
         width = (sum_an / (max_an + _EPS) - 1.0) / (nscale - 1)
         weight = 1.0 / (1.0 + np.exp((cut_off - width) * g))
 
         pc = weight * energy / sum_an
-        covx = pc * np.cos(angl)
-        covy = pc * np.sin(angl)
+        cangl = float(np.cos(angl))
+        sangl = float(np.sin(angl))
+        covx = pc * cangl
+        covy = pc * sangl
         covx2 += covx * covx
         covy2 += covy * covy
         covxy += covx * covy
@@ -245,4 +251,4 @@ def phase_congruency(
     denom = np.sqrt(covxy * covxy + (covx2 - covy2) ** 2) + _EPS
     M = (covy2 + covx2 + denom) * 0.5
 
-    return M, EO, filter_bank
+    return M.astype(np.float32, copy=False), cs, filter_bank
