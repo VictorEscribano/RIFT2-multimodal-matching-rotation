@@ -21,8 +21,9 @@ the log-Gabor filter bank cached internally.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -98,8 +99,96 @@ class RIFT2:
     def detect_and_describe(self, image: np.ndarray) -> RIFT2Result:
         """Run the full RIFT2 pipeline on a single image."""
         gray = self._to_gray(image).astype(np.float64)
+        bank = self._ensure_bank(gray.shape)
+        result, self._filter_bank = self._describe_with_bank(gray, bank)
+        return result
 
-        M, EO, self._filter_bank = phase_congruency(
+    def describe_batch(
+        self,
+        images: Sequence[np.ndarray],
+        max_workers: Optional[int] = None,
+    ) -> List[RIFT2Result]:
+        """Describe many images while amortising filter-bank construction.
+
+        Images are grouped by shape and each group reuses a single
+        log-Gabor bank. Within a group the per-image work runs on a thread
+        pool. Threading only delivers wall-clock speedups when the GIL is
+        released for most of the runtime, which is the case once the
+        Numba descriptor kernel is active and SciPy's pocketfft is doing
+        the FFT; with the pure-Python descriptor fallback the threaded
+        path mostly serializes and you should pass ``max_workers=1``. The
+        filter-bank reuse alone is still worth the call because it
+        amortises construction across same-shape inputs.
+
+        Parameters
+        ----------
+        images
+            Iterable of BGR or grayscale images.
+        max_workers
+            Maximum number of worker threads. ``None`` lets
+            :class:`concurrent.futures.ThreadPoolExecutor` choose.
+
+        Returns
+        -------
+        list of RIFT2Result
+            Results in the same order as ``images``.
+        """
+        prepared: List[Tuple[int, np.ndarray]] = []
+        groups: dict[Tuple[int, int], List[int]] = {}
+        for idx, image in enumerate(images):
+            gray = self._to_gray(image).astype(np.float64)
+            prepared.append((idx, gray))
+            groups.setdefault(gray.shape, []).append(idx)
+
+        results: List[Optional[RIFT2Result]] = [None] * len(prepared)
+
+        for shape, indices in groups.items():
+            bank = self._ensure_bank(shape)
+
+            def _worker(i: int) -> None:
+                _, gray = prepared[i]
+                res, _ = self._describe_with_bank(gray, bank)
+                results[i] = res
+
+            if len(indices) == 1 or max_workers == 1:
+                for i in indices:
+                    _worker(i)
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                    list(ex.map(_worker, indices))
+
+        return [r for r in results if r is not None]
+
+    # ------------------------------------------------------------ internals
+
+    def _ensure_bank(self, shape: Tuple[int, int]) -> _FilterBank:
+        bank = self._filter_bank
+        if (
+            bank is None
+            or bank.shape != shape
+            or bank.nscale != self.nscale
+            or bank.norient != self.norient
+        ):
+            bank = _FilterBank.build(
+                shape,
+                self.nscale,
+                self.norient,
+                self.min_wavelength,
+                self.mult,
+                self.sigma_on_f,
+            )
+            self._filter_bank = bank
+        return bank
+
+    def _describe_with_bank(
+        self, gray: np.ndarray, bank: _FilterBank
+    ) -> Tuple[RIFT2Result, _FilterBank]:
+        """Phase-congruency + descriptor pass against a pre-built filter bank.
+
+        Pure function with respect to ``self``; safe to invoke from worker
+        threads as long as ``bank`` is treated as read-only.
+        """
+        M, EO, bank = phase_congruency(
             gray,
             nscale=self.nscale,
             norient=self.norient,
@@ -109,10 +198,9 @@ class RIFT2:
             k=self.k,
             cut_off=self.cut_off,
             g=self.g,
-            filter_bank=self._filter_bank,
+            filter_bank=bank,
         )
 
-        # Normalize PC map for FAST + orientation assignment.
         Mn = M - M.min()
         peak = Mn.max()
         if peak > 0:
@@ -127,7 +215,8 @@ class RIFT2:
                 oriented = np.empty((0, 3), dtype=np.float32)
             else:
                 oriented = np.concatenate(
-                    [raw_kps, np.zeros((raw_kps.shape[0], 1), dtype=np.float32)], axis=1
+                    [raw_kps, np.zeros((raw_kps.shape[0], 1), dtype=np.float32)],
+                    axis=1,
                 )
 
         mim = build_max_index_map(EO)
@@ -140,8 +229,10 @@ class RIFT2:
             ncells=self.ncells,
         )
         oriented = oriented[valid_idx]
-
-        return RIFT2Result(keypoints=oriented, descriptors=des, pc_map=Mn, mim=mim)
+        return (
+            RIFT2Result(keypoints=oriented, descriptors=des, pc_map=Mn, mim=mim),
+            bank,
+        )
 
     # -------------------------------------------------------- matching helpers
 
