@@ -24,6 +24,7 @@ PAIRS = [
     "sar-optical",
     "depth-optical",
     "map-optical",
+    "inf_drone-optical_drone",
 ]
 
 
